@@ -1,4 +1,17 @@
 steps:
+  # Run unit tests
+  - name: 'golang'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        go test ./...
+        if [ $? -ne 0 ]; then
+          echo "Tests failed. Aborting build."
+          exit 1
+        fi
+    timeout: "300s"
+
   # Build the Docker image
   - name: 'gcr.io/cloud-builders/docker'
     args: ['build', '-t', 'gcr.io/$PROJECT_ID/fub-receiver:$COMMIT_SHA', '.']
