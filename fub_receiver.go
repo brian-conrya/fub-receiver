@@ -108,7 +108,7 @@ func (s *server) fubReceiver(w http.ResponseWriter, r *http.Request) {
 		eventAttribute = event
 	}
 
-	wrappedData := wrapWebhookData(r, string(bodyBytes))
+	wrappedData := wrapWebhookData(r, payload)
 
 	if err := s.publishToPubSub(ctx, wrappedData, eventAttribute); err != nil {
 		slog.Error("failed to publish message", "error", err, "wrappedData", wrappedData)
@@ -122,7 +122,7 @@ func (s *server) fubReceiver(w http.ResponseWriter, r *http.Request) {
 }
 
 // wrapWebhookData processes the request data and query arguments into a structured format.
-func wrapWebhookData(r *http.Request, webhookData string) map[string]interface{} {
+func wrapWebhookData(r *http.Request, webhookData map[string]interface{}) map[string]interface{} {
 	webhookArgs := make(map[string]string)
 	for key, values := range r.URL.Query() {
 		if len(values) > 0 {

@@ -97,7 +97,9 @@ func TestFubReceiverSuccess(t *testing.T) {
 	msgData := string(messages[0].Data)
 
 	expectedMessage := map[string]interface{}{
-		"webhookData": string(body),
+		"webhookData": map[string]interface{}{
+			"event": "peopleCreated",
+		},
 		"webhookArgs": map[string]interface{}{
 			"param1": "value1",
 			"param2": "value2",
