@@ -20,5 +20,15 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/containers/fub-receiver:$COMMIT_SHA']
 
+  # Update the Cloud Run service image
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+      [
+        'run', 'services', 'update', 'fub-receiver',
+        '--image', 'us-central1-docker.pkg.dev/$PROJECT_ID/containers/fub-receiver:$COMMIT_SHA',
+        '--region', 'us-central1',
+        '--platform', 'managed'
+      ]
+
 options:
   logging: CLOUD_LOGGING_ONLY
