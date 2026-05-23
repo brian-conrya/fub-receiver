@@ -5,7 +5,7 @@ go 1.26
 require (
 	cloud.google.com/go/pubsub/v2 v2.6.0
 	github.com/google/go-cmp v0.7.0
-	google.golang.org/api v0.278.0
+	google.golang.org/api v0.280.0
 	google.golang.org/grpc v1.81.1
 )
 
