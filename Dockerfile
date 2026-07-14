@@ -1,6 +1,6 @@
 # Use a pinned official Golang image for the build stage. Pinned by digest
 # for reproducibility; Dependabot keeps it current.
-FROM golang:1.26.3-bookworm@sha256:252599aeb51ad60b83e4d8821802068127c528c707cb7dd7afd93be057c6011c AS builder
+FROM golang:1.26.5-bookworm@sha256:e60d708a92ad26a6d61901334510d3debd23ddcba125663ecd6008d42e8ec669 AS builder
 
 # Set the working directory inside the container.
 WORKDIR /src
