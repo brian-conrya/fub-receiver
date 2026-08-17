@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -26,10 +28,22 @@ import (
 // unauthenticated callers attempting to exhaust memory before the HMAC check.
 const maxBodyBytes = 1 << 20 // 1 MiB
 
+// messagePublisher is the slice of *pubsub.Publisher this service uses.
+//
+// ResumePublish is part of the contract rather than an implementation detail:
+// with ordered publishing a failed key latches and rejects every subsequent
+// message until it is resumed, so any publisher used here has to offer a way
+// to clear that state.
+type messagePublisher interface {
+	Publish(ctx context.Context, msg *pubsub.Message) *pubsub.PublishResult
+	ResumePublish(orderingKey string)
+	Stop()
+}
+
 // server encapsulates all the dependencies required for handling HTTP requests.
 type server struct {
 	pubsubClient *pubsub.Client
-	publisher    *pubsub.Publisher
+	publisher    messagePublisher
 	xSystemKey   []byte
 	projectID    string
 }
@@ -54,9 +68,15 @@ func newServer(ctx context.Context) (*server, error) {
 		return nil, fmt.Errorf("failed to create Pub/Sub client: %w", err)
 	}
 
+	publisher := pubsubClient.Publisher(topicID)
+	// Required before publishing anything with an OrderingKey; Publish rejects
+	// keyed messages otherwise. Messages published without a key are unaffected
+	// and still travel unordered.
+	publisher.EnableMessageOrdering = true
+
 	return &server{
 		pubsubClient: pubsubClient,
-		publisher:    pubsubClient.Publisher(topicID),
+		publisher:    publisher,
 		xSystemKey:   []byte(xSystemKeyEnv),
 		projectID:    projectID,
 	}, nil
@@ -144,15 +164,45 @@ func (s *server) fubReceiver(w http.ResponseWriter, r *http.Request) {
 	}
 
 	eventAttribute, _ := payload["event"].(string)
-	wrappedData := wrapWebhookData(r.URL.Query(), payload)
+	account := r.URL.Query().Get("account")
 
-	if err := s.publishToPubSub(ctx, wrappedData, eventAttribute); err != nil {
+	// Fan out to one message per resource. Subscribers can then be given an
+	// ordering key per person, which is what lets them process a single
+	// person's events strictly in sequence while still running many people
+	// concurrently. Events that name no resource publish once, unkeyed.
+	ids := resourceIDs(payload)
+	messages := make([]*pubsub.Message, 0, max(len(ids), 1))
+
+	if len(ids) == 0 {
+		wrapped, err := marshalWrapped(r.URL.Query(), payload)
+		if err != nil {
+			log.Error("failed to marshal payload", "error", err, "query", query)
+			writeJSONError(w, http.StatusInternalServerError, "Internal error")
+			return
+		}
+		messages = append(messages, newMessage(wrapped, eventAttribute, ""))
+	} else {
+		for _, id := range ids {
+			wrapped, err := marshalWrapped(r.URL.Query(), withSingleResourceID(payload, id))
+			if err != nil {
+				log.Error("failed to marshal payload", "error", err, "resource_id", id, "query", query)
+				writeJSONError(w, http.StatusInternalServerError, "Internal error")
+				return
+			}
+			// account:personID -- person ids are only unique within an account,
+			// so keying on the id alone would serialise unrelated accounts
+			// against each other.
+			messages = append(messages, newMessage(wrapped, eventAttribute, account+":"+id))
+		}
+	}
+
+	if err := s.publishAll(ctx, messages); err != nil {
 		log.Error("failed to publish message", "error", err, "event", eventAttribute, "query", query)
 		writeJSONError(w, http.StatusInternalServerError, "Internal error")
 		return
 	}
 
-	log.Info("webhook processed", "event", eventAttribute, "body_len", len(bodyBytes))
+	log.Info("webhook processed", "event", eventAttribute, "messages", len(messages), "body_len", len(bodyBytes))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -173,30 +223,96 @@ func wrapWebhookData(query url.Values, webhookData map[string]any) map[string]an
 	}
 }
 
-// publishToPubSub publishes the data to Pub/Sub and waits for the result. The
-// publish context is detached from the caller's request context via
+// resourceIDs extracts webhookData.resourceIds as strings.
+//
+// encoding/json decodes numbers into float64, so these are formatted back to
+// integers rather than stringified directly -- otherwise the ordering key would
+// read "123" on one path and "1.23e+02" on another and stop matching.
+func resourceIDs(payload map[string]any) []string {
+	raw, ok := payload["resourceIds"].([]any)
+	if !ok {
+		return nil
+	}
+
+	ids := make([]string, 0, len(raw))
+	for _, value := range raw {
+		switch v := value.(type) {
+		case float64:
+			if v != math.Trunc(v) {
+				continue // not an id
+			}
+			ids = append(ids, strconv.FormatInt(int64(v), 10))
+		case string:
+			if v != "" {
+				ids = append(ids, v)
+			}
+		}
+	}
+	return ids
+}
+
+// withSingleResourceID copies the payload with resourceIds narrowed to one id.
+// The copy matters: mutating the shared payload in a loop would leave every
+// published message carrying whichever id happened to be written last.
+func withSingleResourceID(payload map[string]any, id string) map[string]any {
+	single := make(map[string]any, len(payload))
+	for k, v := range payload {
+		single[k] = v
+	}
+	single["resourceIds"] = []any{id}
+	return single
+}
+
+func marshalWrapped(query url.Values, payload map[string]any) ([]byte, error) {
+	wrapped, err := json.Marshal(wrapWebhookData(query, payload))
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal wrapped data: %w", err)
+	}
+	return wrapped, nil
+}
+
+func newMessage(data []byte, eventAttribute, orderingKey string) *pubsub.Message {
+	msg := &pubsub.Message{Data: data, OrderingKey: orderingKey}
+	if eventAttribute != "" {
+		msg.Attributes = map[string]string{"event": eventAttribute}
+	}
+	return msg
+}
+
+// publishAll publishes every message and waits for all of them. The publish
+// context is detached from the caller's request context via
 // context.WithoutCancel: if FUB disconnects mid-handler, pubsub's background
 // goroutines may still deliver the message, and we don't want to return an
 // error (causing a FUB retry -> duplicate) for a publish that actually
 // succeeded. A hard timeout still bounds how long we'll wait.
-func (s *server) publishToPubSub(ctx context.Context, wrappedData map[string]any, eventAttribute string) error {
-	wrappedBytes, err := json.Marshal(wrappedData)
-	if err != nil {
-		return fmt.Errorf("failed to marshal wrapped data: %w", err)
-	}
-
-	msg := &pubsub.Message{Data: wrappedBytes}
-	if eventAttribute != "" {
-		msg.Attributes = map[string]string{"event": eventAttribute}
-	}
-
+//
+// Every message is handed to Publish before any result is awaited, so a webhook
+// naming many people costs roughly one round trip rather than one per person.
+func (s *server) publishAll(ctx context.Context, messages []*pubsub.Message) error {
 	pubCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 
-	if _, err := s.publisher.Publish(pubCtx, msg).Get(pubCtx); err != nil {
-		return fmt.Errorf("failed to publish message: %w", err)
+	results := make([]*pubsub.PublishResult, 0, len(messages))
+	for _, msg := range messages {
+		results = append(results, s.publisher.Publish(pubCtx, msg))
 	}
-	return nil
+
+	var firstErr error
+	for i, result := range results {
+		if _, err := result.Get(pubCtx); err != nil {
+			// Ordered publishing latches on failure: once a key errors, every
+			// later publish for that key fails immediately and permanently
+			// until it is resumed. Without this one transient error would wedge
+			// that person's events for the lifetime of the process.
+			if key := messages[i].OrderingKey; key != "" {
+				s.publisher.ResumePublish(key)
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to publish message: %w", err)
+			}
+		}
+	}
+	return firstErr
 }
 
 func main() {

@@ -101,7 +101,15 @@ Each Pub/Sub message has:
 
 ## Subscriber design
 
-Pub/Sub is at-least-once and not strictly ordered. The patterns below handle the failure modes that actually come up; you don't need to add ordering on the publish side.
+Pub/Sub is at-least-once. The patterns below handle the failure modes that actually come up.
+
+**One message per resource, keyed by person.** A webhook naming N resources is fanned out into N messages, each carrying a single-element `resourceIds` and an ordering key of `account:personId`. A subscriber that enables ordering therefore sees one person's events strictly in sequence, while still processing different people concurrently. The key includes the account because person ids are only unique within one. Events that name no resource are published once with no ordering key.
+
+Enabling ordering is the *subscriber's* choice: `OrderingKey` is ignored by subscriptions that don't have `enableMessageOrdering` set, so subscriptions that want unordered delivery are unaffected and need no change. Note that `enableMessageOrdering` is immutable — turning it on means creating a new subscription, not updating the existing one.
+
+**Ordering does not give you mutual exclusion.** Pub/Sub delivers one message at a time per key only in the happy path. On ack-deadline expiry it redelivers while the original delivery may still be in flight, so two workers can still process one person at once. Ordering buys sequencing; excluding concurrent work needs a lock the subscriber holds itself.
+
+**With ordering enabled, a dead-letter topic stops being optional.** A message that keeps failing blocks every later message for its key, so one poison message wedges that person indefinitely rather than merely being slow.
 
 **Events arrive out of order.** A `peopleTagsUpdated` can land at a subscriber before its matching `peopleCreated` for one of three reasons: FUB sometimes hits this webhook out of order (parallel POSTs, their retries); Pub/Sub doesn't preserve publish order without ordering keys; FUB's own API can be briefly inconsistent after firing a webhook. The mitigation: when the subscriber fetches the entity from FUB and gets a 404, NACK the message. Pub/Sub redelivers after the ack deadline (default 10s, backoff up to ~10 min). By the time it comes back, the precondition almost always exists.
 
