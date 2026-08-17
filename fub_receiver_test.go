@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	pubsub "cloud.google.com/go/pubsub/v2"
 	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
@@ -433,5 +434,39 @@ func TestFubReceiverResumesFailedOrderingKeys(t *testing.T) {
 		if key == "" {
 			t.Error("resumed an unkeyed message")
 		}
+	}
+}
+
+// The client keeps one bundler per ordering key, so a fanned-out webhook costs
+// one Publish RPC per person rather than one batched call. A fixed budget would
+// fail bulk webhooks no matter how often FUB retried them.
+func TestPublishTimeoutScalesWithFanOut(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		messages int
+		want     time.Duration
+	}{
+		{1, 10*time.Second + 15*time.Millisecond},
+		{100, 11500 * time.Millisecond},
+		{1000, 25 * time.Second}, // ceiling
+		{100000, 25 * time.Second},
+	}
+
+	for _, tc := range cases {
+		if got := publishTimeout(tc.messages); got != tc.want {
+			t.Errorf("publishTimeout(%d) = %v, want %v", tc.messages, got, tc.want)
+		}
+	}
+}
+
+// The ceiling must stay under the HTTP server's WriteTimeout, or the response
+// is cut off mid-flight and FUB sees a failure for a publish that succeeded.
+func TestPublishTimeoutStaysUnderWriteTimeout(t *testing.T) {
+	t.Parallel()
+
+	const writeTimeout = 30 * time.Second
+	if got := publishTimeout(1 << 20); got >= writeTimeout {
+		t.Errorf("publishTimeout ceiling %v is not below WriteTimeout %v", got, writeTimeout)
 	}
 }

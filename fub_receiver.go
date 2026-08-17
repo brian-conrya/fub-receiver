@@ -165,6 +165,13 @@ func (s *server) fubReceiver(w http.ResponseWriter, r *http.Request) {
 
 	eventAttribute, _ := payload["event"].(string)
 	account := r.URL.Query().Get("account")
+	if account == "" {
+		// Not fatal here, but worth surfacing: subscribers key their work on it,
+		// and an ordering key without one would serialise unrelated accounts
+		// that happen to share a person id. In practice it means the webhook
+		// was registered in FUB without ?account=.
+		log.Warn("webhook has no account query parameter", "query", query)
+	}
 
 	// Fan out to one message per resource. Subscribers can then be given an
 	// ordering key per person, which is what lets them process a single
@@ -271,6 +278,26 @@ func marshalWrapped(query url.Values, payload map[string]any) ([]byte, error) {
 	return wrapped, nil
 }
 
+// publishTimeout scales the publish budget with the size of the fan-out.
+//
+// The client keeps one bundler per ordering key, so messages with distinct keys
+// are never batched together: a webhook naming N people costs N Publish RPCs,
+// not one. A fixed budget would therefore fail bulk webhooks (a mass stage
+// change in FUB) no matter how many times FUB retried them, turning a large
+// webhook into a permanently poisoned one.
+//
+// The ceiling stays under the server's WriteTimeout so the response is still
+// written rather than cut off mid-flight.
+func publishTimeout(messages int) time.Duration {
+	const (
+		base    = 10 * time.Second
+		perItem = 15 * time.Millisecond
+		ceiling = 25 * time.Second
+	)
+	timeout := base + time.Duration(messages)*perItem
+	return min(timeout, ceiling)
+}
+
 func newMessage(data []byte, eventAttribute, orderingKey string) *pubsub.Message {
 	msg := &pubsub.Message{Data: data, OrderingKey: orderingKey}
 	if eventAttribute != "" {
@@ -289,7 +316,7 @@ func newMessage(data []byte, eventAttribute, orderingKey string) *pubsub.Message
 // Every message is handed to Publish before any result is awaited, so a webhook
 // naming many people costs roughly one round trip rather than one per person.
 func (s *server) publishAll(ctx context.Context, messages []*pubsub.Message) error {
-	pubCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	pubCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), publishTimeout(len(messages)))
 	defer cancel()
 
 	results := make([]*pubsub.PublishResult, 0, len(messages))
