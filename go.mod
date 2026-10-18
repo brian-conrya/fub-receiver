@@ -2,6 +2,8 @@ module fub-receiver
 
 go 1.26.0
 
+toolchain go1.26.9
+
 require (
 	cloud.google.com/go/pubsub/v2 v2.6.0
 	github.com/google/go-cmp v0.7.0
