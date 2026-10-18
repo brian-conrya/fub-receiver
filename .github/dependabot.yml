@@ -5,6 +5,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # Every module update edits go.mod and go.sum, so separate PRs conflict as
+    # soon as one merges. One grouped PR per week avoids that.
+    groups:
+      go-modules:
+        patterns: ["*"]
 
   - package-ecosystem: github-actions
     directory: "/"

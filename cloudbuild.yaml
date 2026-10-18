@@ -58,18 +58,25 @@ steps:
 
   # Update the Cloud Run service image. --revision-suffix tags the new revision
   # with the short commit SHA so rollback in the Cloud Run console is unambiguous.
+  # The first 8 characters of the build ID keep the name unique, because Cloud
+  # Run rejects a revision name that already exists, which would otherwise fail
+  # a re-run of the same commit. Cloud Build substitutions can't take a
+  # substring, hence bash and the env indirection ($$ escapes to a literal $).
   - name: 'gcr.io/cloud-builders/gcloud'
     id: 'deploy'
+    entrypoint: 'bash'
+    env:
+      - 'SHORT_SHA=$SHORT_SHA'
+      - 'BUILD_ID=$BUILD_ID'
     args:
-      - 'run'
-      - 'services'
-      - 'update'
-      - 'fub-receiver'
-      - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/containers/fub-receiver:$COMMIT_SHA'
-      - '--region=us-central1'
-      - '--platform=managed'
-      - '--revision-suffix=sha-$SHORT_SHA'
-      - '--quiet'
+      - '-c'
+      - |
+        gcloud run services update fub-receiver \
+          --image=us-central1-docker.pkg.dev/$PROJECT_ID/containers/fub-receiver:$COMMIT_SHA \
+          --region=us-central1 \
+          --platform=managed \
+          --revision-suffix="sha-$${SHORT_SHA}-$${BUILD_ID:0:8}" \
+          --quiet
 
 options:
   logging: CLOUD_LOGGING_ONLY
