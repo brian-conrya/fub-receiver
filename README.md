@@ -2,6 +2,8 @@
 
 A small Go service that receives [Follow Up Boss](https://www.followupboss.com/) webhooks, verifies their signature, and republishes them to a Google Cloud Pub/Sub topic.
 
+Not affiliated with or endorsed by Follow Up Boss.
+
 ## Why
 
 FUB sends a webhook per event. If you want more than one thing to happen on that event (sync to another CRM, kick off an automation, log to BigQuery, etc.), a single webhook endpoint becomes a bottleneck: it can only do one job, and if that job is slow or down, you've lost the event. FUB only retries briefly.
@@ -14,7 +16,7 @@ This service is a thin fan-out layer. It validates the FUB signature once at the
 FUB -> fub-receiver -> Pub/Sub topic -> subscribers
 ```
 
-The service verifies the `FUB-Signature` header (HMAC-SHA256 of the base64-encoded body, hex-encoded), wraps the body with the request's URL query string args, and publishes to the configured topic.
+The service verifies the `FUB-Signature` header (HMAC-SHA256 of the base64-encoded body, hex-encoded), splits the webhook into one message per resource, wraps each with the request's URL query string args, and publishes them to the configured topic.
 
 ## Configuration
 
@@ -35,15 +37,64 @@ When you register a webhook with FUB, you supply an `X-System-Key` header. FUB t
 
 Store the value in Secret Manager and bind it to the Cloud Run service. Do not put it in plain environment config.
 
+## First-time setup
+
+The steps below create everything the service needs in a GCP project and do the first deploy. They match the names [cloudbuild.yaml](cloudbuild.yaml) expects: an Artifact Registry repository called `containers` and a Cloud Run service called `fub-receiver`, both in `us-central1`.
+
+```sh
+export PROJECT_ID=your-project-id
+export REGION=us-central1
+export TOPIC=fub-events
+export SA=fub-receiver@$PROJECT_ID.iam.gserviceaccount.com
+gcloud config set project $PROJECT_ID
+
+gcloud services enable run.googleapis.com pubsub.googleapis.com \
+  secretmanager.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com
+
+# Topic, image repository, and the identity the service runs as
+gcloud pubsub topics create $TOPIC
+gcloud artifacts repositories create containers --repository-format=docker --location=$REGION
+gcloud iam service-accounts create fub-receiver
+gcloud pubsub topics add-iam-policy-binding $TOPIC \
+  --member=serviceAccount:$SA --role=roles/pubsub.publisher
+
+# The shared X-System-Key, read from the terminal so it stays out of shell history
+read -rs KEY && printf %s "$KEY" | gcloud secrets create fub-x-system-key --data-file=-
+gcloud secrets add-iam-policy-binding fub-x-system-key \
+  --member=serviceAccount:$SA --role=roles/secretmanager.secretAccessor
+
+# First deploy, built from source with the Dockerfile
+gcloud run deploy fub-receiver --source . --region=$REGION \
+  --service-account=$SA \
+  --allow-unauthenticated \
+  --set-env-vars=PROJECT_ID=$PROJECT_ID,TOPIC=$TOPIC \
+  --set-secrets=X_SYSTEM_KEY=fub-x-system-key:latest
+```
+
+`--allow-unauthenticated` is required: FUB can't present Google credentials, so the endpoint has to be public. The HMAC signature check is what keeps it closed. If an organization policy blocks public Cloud Run services, it needs an exception for this one.
+
+The deploy prints the service URL. That's the URL you register with FUB (see below).
+
+### Continuous deployment
+
+Connect the GitHub repository to Cloud Build and create a trigger that runs [cloudbuild.yaml](cloudbuild.yaml) on **pushes to `main` only**. Don't trigger on pull requests: the build deploys with your project's permissions, so a PR trigger would let anyone who opens a PR run code in your project.
+
+The service account the trigger runs as needs:
+
+- `roles/artifactregistry.writer` to push the image
+- `roles/run.developer` to update the service
+- `roles/iam.serviceAccountUser` on `fub-receiver@...` to deploy a service that runs as it
+- `roles/logging.logWriter` because the build logs to Cloud Logging only
+
 ## Deployment
 
 Push to `main` triggers Cloud Build ([cloudbuild.yaml](cloudbuild.yaml)):
 
 1. Runs the same checks as local CI (fmt, vet, lint, test, vuln).
 2. Builds and pushes a container image to Artifact Registry at `us-central1-docker.pkg.dev/$PROJECT_ID/containers/fub-receiver`.
-3. Updates the `fub-receiver` Cloud Run service in `us-central1`. The new revision is suffixed with the commit short SHA so rollback in the Cloud Run console is unambiguous.
+3. Updates the `fub-receiver` Cloud Run service in `us-central1`. The new revision is suffixed with the commit short SHA so rollback in the Cloud Run console is unambiguous, plus a fragment of the build ID so re-running a build for the same commit doesn't collide with the revision it already created.
 
-The Cloud Build trigger itself lives outside this repo (GCP console / Terraform / etc.).
+The update keeps the service's existing environment, secret bindings, and service account, so those only need setting once (see [First-time setup](#first-time-setup)).
 
 Pull requests run the same check suite via GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) before merge. Dependabot opens PRs weekly for Go modules, GitHub Actions versions, and Docker base images.
 
@@ -61,7 +112,7 @@ curl -X POST https://api.followupboss.com/v1/webhooks \
   -H 'X-System-Key: SAME_VALUE_AS_X_SYSTEM_KEY_ENV_VAR' \
   -d '{
     "event": "peopleCreated",
-    "url": "https://fub-receiver-XXXXXXX-uc.a.run.app/"
+    "url": "https://fub-receiver-XXXXXXX-uc.a.run.app/?account=alpha"
   }'
 ```
 
@@ -69,20 +120,35 @@ Register one POST per event you want (`peopleCreated`, `peopleUpdated`, `peopleT
 
 To list current webhooks: `GET /v1/webhooks`. To remove one: `DELETE /v1/webhooks/{id}`.
 
-### Passing context via webhook args
+### The `account` parameter
 
-The URL you register can carry an arbitrary query string. `fub-receiver` doesn't interpret it; it just extracts the parameters into `webhookArgs` on the published Pub/Sub message verbatim. Use whatever keys make sense for your downstream.
-
-A common use is distinguishing multiple FUB accounts feeding into one receiver. Pick any key name (`account`, `tenant`, `client`, `org`, whatever fits) and register each account against a URL that includes it:
+Always register webhook URLs with an `account` query parameter naming the FUB account, even if you only have one:
 
 ```
 https://fub-receiver-XXXXXXX-uc.a.run.app/?account=alpha
 https://fub-receiver-XXXXXXX-uc.a.run.app/?account=beta
 ```
 
-Subscribers read the corresponding key from `webhookArgs` and route accordingly. Without something like this you can't tell the accounts apart, because the IDs in the webhook body are scoped to a single FUB account.
+The name `account` is fixed. The service builds each message's ordering key from it (see [Subscriber design](#subscriber-design)), and IDs in the webhook body are only unique within one FUB account, so this is also how subscribers tell accounts apart. A webhook without `account` still publishes, but it logs a warning, and its ordering keys collide with those of any other account that's missing one.
 
-You can pass anything else here too: a routing hint for downstream subscribers, a feature flag, an environment tag (`env=staging`), etc. The query string is part of the registered webhook URL and is visible to anyone who can read your FUB account's webhook list, so don't put secrets in it.
+### Other webhook args
+
+Any other query parameters are passed through into `webhookArgs` on the published message without interpretation: a routing hint for downstream subscribers, a feature flag, an environment tag (`env=staging`), etc. If a key repeats, only its first value is kept.
+
+The query string is part of the registered webhook URL and is visible to anyone who can read your FUB account's webhook list, so don't put secrets in it.
+
+## HTTP responses
+
+The service accepts `POST` on any path and replies with JSON:
+
+| Status | Meaning                                                     |
+| ------ | ----------------------------------------------------------- |
+| `200`  | Every message was published. Body is `{}`.                  |
+| `400`  | Missing or invalid `FUB-Signature`, or the body isn't JSON. |
+| `413`  | Body is larger than 1 MiB.                                  |
+| `500`  | Publishing to Pub/Sub failed.                               |
+
+Error bodies look like `{"message":"Invalid FUB-Signature header"}`. A `500` is the only response worth FUB retrying; the others will fail the same way every time.
 
 ## Published message shape
 
@@ -92,12 +158,20 @@ Each Pub/Sub message has:
 
 ```json
 {
-  "webhookData": { "...": "verbatim FUB webhook body" },
-  "webhookArgs": { "param1": "value1" }
+  "webhookData": {
+    "event": "peopleUpdated",
+    "resourceIds": ["123"],
+    "...": "remaining FUB webhook fields, unchanged"
+  },
+  "webhookArgs": { "account": "alpha" }
 }
 ```
 
+`webhookData` is the FUB webhook body with one change: a webhook naming several resources is split into one message per resource, so `resourceIds` always holds exactly one id. **That id is a string**, even though FUB sends it as a number. Events with no `resourceIds` are published once with the body unchanged.
+
 **Attributes:** a single `event` attribute, set to the `event` field from the webhook body when present (e.g. `peopleCreated`). Subscribers can filter on it directly: `attributes.event = "peopleCreated"`.
+
+**Ordering key:** `account:resourceId` (e.g. `alpha:123`) when the message names a resource, and empty otherwise.
 
 ## Subscriber design
 
@@ -105,7 +179,7 @@ Pub/Sub is at-least-once. The patterns below handle the failure modes that actua
 
 **One message per resource, keyed by person.** A webhook naming N resources is fanned out into N messages, each carrying a single-element `resourceIds` and an ordering key of `account:personId`. A subscriber that enables ordering therefore sees one person's events strictly in sequence, while still processing different people concurrently. The key includes the account because person ids are only unique within one. Events that name no resource are published once with no ordering key.
 
-Enabling ordering is the *subscriber's* choice: `OrderingKey` is ignored by subscriptions that don't have `enableMessageOrdering` set, so subscriptions that want unordered delivery are unaffected and need no change. Note that `enableMessageOrdering` is immutable — turning it on means creating a new subscription, not updating the existing one.
+Enabling ordering is the *subscriber's* choice: `OrderingKey` is ignored by subscriptions that don't have `enableMessageOrdering` set, so subscriptions that want unordered delivery are unaffected and need no change. Note that `enableMessageOrdering` is immutable: turning it on means creating a new subscription, not updating the existing one.
 
 **Ordering does not give you mutual exclusion.** Pub/Sub delivers one message at a time per key only in the happy path. On ack-deadline expiry it redelivers while the original delivery may still be in flight, so two workers can still process one person at once. Ordering buys sequencing; excluding concurrent work needs a lock the subscriber holds itself.
 
@@ -129,3 +203,7 @@ make test    # tests only, with race detector and shuffled order
 ```
 
 Tests use the in-memory `pstest` Pub/Sub fake. No GCP credentials needed to run them.
+
+## License
+
+[MIT](LICENSE)
