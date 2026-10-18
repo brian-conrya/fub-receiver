@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 
 # Use a minimal distroless image for the final stage. The :nonroot variant
 # runs as UID 65532, also pinned by digest.
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
 
 # Copy the binary from the builder stage.
 COPY --from=builder /out/fub-receiver /fub-receiver
