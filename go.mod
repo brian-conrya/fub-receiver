@@ -2,7 +2,7 @@ module fub-receiver
 
 go 1.26.0
 
-toolchain go1.26.9
+toolchain go1.27.2
 
 require (
 	cloud.google.com/go/pubsub/v2 v2.7.0

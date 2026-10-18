@@ -22,6 +22,21 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Dependabot bumps the Dockerfile's golang image on its own, which would
+      # leave production building with a different Go than CI tests with.
+      - name: Go versions agree
+        run: |
+          mod=$(sed -n 's/^toolchain go//p' go.mod)
+          docker=$(sed -n 's/^FROM golang:\([0-9.]*\)-.*/\1/p' Dockerfile)
+          cloudbuild=$(sed -n "s/.*name: 'golang:\([0-9.]*\)'.*/\1/p" cloudbuild.yaml | sort -u)
+          echo "go.mod toolchain: $mod"
+          echo "Dockerfile:       $docker"
+          echo "cloudbuild.yaml:  $cloudbuild"
+          if [ -z "$mod" ] || [ "$mod" != "$docker" ] || [ "$mod" != "$cloudbuild" ]; then
+            echo "::error::Go versions differ. Set the same version in go.mod (toolchain), Dockerfile, and cloudbuild.yaml."
+            exit 1
+          fi
+
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -37,7 +52,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12.2
+          version: v2.14.0
 
       - name: test
         run: go test -race -shuffle=on -count=1 ./...

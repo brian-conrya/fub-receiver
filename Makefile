@@ -4,7 +4,7 @@ GO ?= go
 GOBIN ?= $(shell $(GO) env GOPATH)/bin
 
 # Tool versions used by `make tools`. Keep these in sync with .github/workflows/ci.yml.
-GOLANGCI_LINT_VERSION ?= v2.12.2
+GOLANGCI_LINT_VERSION ?= v2.14.0
 GOVULNCHECK_VERSION ?= latest
 
 test:

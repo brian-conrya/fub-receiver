@@ -1,6 +1,6 @@
 steps:
   # Format check
-  - name: 'golang:1.26.9'
+  - name: 'golang:1.27.2'
     id: 'fmt-check'
     entrypoint: 'sh'
     args:
@@ -15,30 +15,30 @@ steps:
     timeout: "60s"
 
   # Static analysis
-  - name: 'golang:1.26.9'
+  - name: 'golang:1.27.2'
     id: 'vet'
     entrypoint: 'go'
     args: ['vet', './...']
     timeout: "120s"
 
   # Linter
-  - name: 'golang:1.26.9'
+  - name: 'golang:1.27.2'
     id: 'lint'
     entrypoint: 'sh'
     args:
       - '-c'
-      - 'go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 && golangci-lint run ./...'
+      - 'go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 && golangci-lint run ./...'
     timeout: "300s"
 
   # Unit tests with race detector
-  - name: 'golang:1.26.9'
+  - name: 'golang:1.27.2'
     id: 'test'
     entrypoint: 'go'
     args: ['test', '-race', '-shuffle=on', '-count=1', './...']
     timeout: "300s"
 
   # Vulnerability scan
-  - name: 'golang:1.26.9'
+  - name: 'golang:1.27.2'
     id: 'vuln'
     entrypoint: 'sh'
     args:
@@ -49,12 +49,12 @@ steps:
   # Build the Docker image
   - name: 'gcr.io/cloud-builders/docker'
     id: 'docker-build'
-    args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/containers/fub-receiver:$COMMIT_SHA', '.']
+    args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA', '.']
 
   # Push the image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
     id: 'docker-push'
-    args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/containers/fub-receiver:$COMMIT_SHA']
+    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA']
 
   # Update the Cloud Run service image. --revision-suffix tags the new revision
   # with the short commit SHA so rollback in the Cloud Run console is unambiguous.
@@ -71,12 +71,19 @@ steps:
     args:
       - '-c'
       - |
-        gcloud run services update fub-receiver \
-          --image=us-central1-docker.pkg.dev/$PROJECT_ID/containers/fub-receiver:$COMMIT_SHA \
-          --region=us-central1 \
+        gcloud run services update ${_SERVICE} \
+          --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA \
+          --region=${_REGION} \
           --platform=managed \
           --revision-suffix="sha-$${SHORT_SHA}-$${BUILD_ID:0:8}" \
           --quiet
 
 options:
   logging: CLOUD_LOGGING_ONLY
+
+# Where the image and service live. Override any of these in the Cloud Build
+# trigger's substitution variables rather than editing this file.
+substitutions:
+  _REGION: us-central1
+  _AR_REPO: containers
+  _SERVICE: fub-receiver

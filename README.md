@@ -39,7 +39,7 @@ Store the value in Secret Manager and bind it to the Cloud Run service. Do not p
 
 ## First-time setup
 
-The steps below create everything the service needs in a GCP project and do the first deploy. They match the names [cloudbuild.yaml](cloudbuild.yaml) expects: an Artifact Registry repository called `containers` and a Cloud Run service called `fub-receiver`, both in `us-central1`.
+The steps below create everything the service needs in a GCP project and do the first deploy. They use the names [cloudbuild.yaml](cloudbuild.yaml) defaults to: an Artifact Registry repository called `containers` and a Cloud Run service called `fub-receiver`, both in `us-central1`. To use different ones, change them here and set the matching substitution variables on the Cloud Build trigger (see [Continuous deployment](#continuous-deployment)).
 
 ```sh
 export PROJECT_ID=your-project-id
@@ -79,6 +79,16 @@ The deploy prints the service URL. That's the URL you register with FUB (see bel
 
 Connect the GitHub repository to Cloud Build and create a trigger that runs [cloudbuild.yaml](cloudbuild.yaml) on **pushes to `main` only**. Don't trigger on pull requests: the build deploys with your project's permissions, so a PR trigger would let anyone who opens a PR run code in your project.
 
+If you used names other than the defaults, set them as substitution variables on the trigger:
+
+| Variable    | Default        | Meaning                           |
+| ----------- | -------------- | --------------------------------- |
+| `_REGION`   | `us-central1`  | Region of the repository and service |
+| `_AR_REPO`  | `containers`   | Artifact Registry repository      |
+| `_SERVICE`  | `fub-receiver` | Cloud Run service (and image name) |
+
+Cloud Build isn't required. Without it, redeploy by re-running the `gcloud run deploy --source .` command from the setup steps; the service keeps its environment and secret bindings.
+
 The service account the trigger runs as needs:
 
 - `roles/artifactregistry.writer` to push the image
@@ -91,8 +101,8 @@ The service account the trigger runs as needs:
 Push to `main` triggers Cloud Build ([cloudbuild.yaml](cloudbuild.yaml)):
 
 1. Runs the same checks as local CI (fmt, vet, lint, test, vuln).
-2. Builds and pushes a container image to Artifact Registry at `us-central1-docker.pkg.dev/$PROJECT_ID/containers/fub-receiver`.
-3. Updates the `fub-receiver` Cloud Run service in `us-central1`. The new revision is suffixed with the commit short SHA so rollback in the Cloud Run console is unambiguous, plus a fragment of the build ID so re-running a build for the same commit doesn't collide with the revision it already created.
+2. Builds and pushes a container image to Artifact Registry (by default `us-central1-docker.pkg.dev/$PROJECT_ID/containers/fub-receiver`).
+3. Updates the Cloud Run service (by default `fub-receiver` in `us-central1`). The new revision is suffixed with the commit short SHA so rollback in the Cloud Run console is unambiguous, plus a fragment of the build ID so re-running a build for the same commit doesn't collide with the revision it already created.
 
 The update keeps the service's existing environment, secret bindings, and service account, so those only need setting once (see [First-time setup](#first-time-setup)).
 
@@ -203,6 +213,8 @@ make test    # tests only, with race detector and shuffled order
 ```
 
 Tests use the in-memory `pstest` Pub/Sub fake. No GCP credentials needed to run them.
+
+The Go version is pinned in three places that must agree: the `toolchain` line in `go.mod`, the `golang` image in the `Dockerfile`, and the `golang` step images in `cloudbuild.yaml`. CI fails if they don't, so when Dependabot bumps the Dockerfile alone, update the other two on the same branch.
 
 ## License
 
