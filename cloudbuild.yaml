@@ -1,6 +1,6 @@
 steps:
   # Format check
-  - name: 'golang:1.26.6'
+  - name: 'golang:1.26.9'
     id: 'fmt-check'
     entrypoint: 'sh'
     args:
@@ -15,14 +15,14 @@ steps:
     timeout: "60s"
 
   # Static analysis
-  - name: 'golang:1.26.6'
+  - name: 'golang:1.26.9'
     id: 'vet'
     entrypoint: 'go'
     args: ['vet', './...']
     timeout: "120s"
 
   # Linter
-  - name: 'golang:1.26.6'
+  - name: 'golang:1.26.9'
     id: 'lint'
     entrypoint: 'sh'
     args:
@@ -31,14 +31,14 @@ steps:
     timeout: "300s"
 
   # Unit tests with race detector
-  - name: 'golang:1.26.6'
+  - name: 'golang:1.26.9'
     id: 'test'
     entrypoint: 'go'
     args: ['test', '-race', '-shuffle=on', '-count=1', './...']
     timeout: "300s"
 
   # Vulnerability scan
-  - name: 'golang:1.26.6'
+  - name: 'golang:1.26.9'
     id: 'vuln'
     entrypoint: 'sh'
     args:
